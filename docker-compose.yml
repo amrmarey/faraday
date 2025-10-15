@@ -1,0 +1,131 @@
+# ==========================================================
+# Faraday Vulnerability Management Platform - Secure Setup
+# Includes:
+#   - Faraday Server (App)
+#   - PostgreSQL (Database)
+#   - Redis (Cache/Session)
+#   - Nginx Reverse Proxy (HTTPS)
+# Features:
+#   - HTTPS enabled
+#   - Network isolation (frontend/backend)
+#   - Health checks & persistent volumes
+# ==========================================================
+
+services:
+  # ------------------------------
+  # PostgreSQL Database Service
+  # ------------------------------
+  faraday-db:
+    image: postgres:15-alpine
+    container_name: faraday-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASS}
+      POSTGRES_DB: ${DB_NAME}
+      # POSTGRES_INITDB_ARGS: "--data-checksums"  # Optional: enable integrity checks
+    volumes:
+      - faraday_db_data:/var/lib/postgresql/data
+    networks:
+      - faraday_backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ------------------------------
+  # Redis Cache (secured with password)
+  # ------------------------------
+  faraday-redis:
+    image: redis:7-alpine
+    container_name: faraday-redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASS}", "--save", "60", "1", "--loglevel", "warning"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASS}
+    volumes:
+      - faraday_redis_data:/data
+    networks:
+      - faraday_backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASS}", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ------------------------------
+  # Faraday Main Application
+  # ------------------------------
+  faraday-server:
+    image: infobyte/faraday:4.8.2    # Pin version for production stability
+    container_name: faraday-server
+    depends_on:
+      faraday-db:
+        condition: service_healthy
+      faraday-redis:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      FARADAY_POSTGRESQL_USER: ${DB_USER}
+      FARADAY_POSTGRESQL_PASSWORD: ${DB_PASS}
+      FARADAY_POSTGRESQL_HOST: faraday-db
+      FARADAY_POSTGRESQL_PORT: 5432
+      FARADAY_POSTGRESQL_DATABASE: ${DB_NAME}
+      FARADAY_REDIS_HOST: faraday-redis
+      FARADAY_REDIS_PASSWORD: ${REDIS_PASS}
+      FARADAY_SERVER_SECRET_KEY: ${SECRET_KEY}
+      FARADAY_SERVER_BIND_ADDRESS: "0.0.0.0"
+    volumes:
+      - faraday_data:/var/lib/faraday
+    networks:
+      - faraday_backend
+      - faraday_frontend
+    user: "1000:1000"   # Run as non-root for security
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5985/_api/v3/info || exit 1"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+
+  # ------------------------------
+  # Nginx Reverse Proxy with HTTPS
+  # ------------------------------
+  nginx-proxy:
+    image: nginx:1.27-alpine
+    container_name: faraday-nginx
+    depends_on:
+      faraday-server:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "80:80"          # Redirect HTTP to HTTPS
+      - "443:443"        # Main HTTPS endpoint
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/logs:/var/log/nginx
+    networks:
+      - faraday_frontend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f https://localhost || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+# ------------------------------
+# Network Configuration
+# ------------------------------
+networks:
+  faraday_backend:
+    driver: bridge
+  faraday_frontend:
+    driver: bridge
+
+# ------------------------------
+# Persistent Volumes
+# ------------------------------
+volumes:
+  faraday_data:
+  faraday_db_data:
+  faraday_redis_data:
