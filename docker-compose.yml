@@ -1,5 +1,5 @@
 # ================================
-# Faraday Security Platform - Secure Docker Compose Deployment
+# Faraday Security Platform - Secure Docker Compose Deployment (with live logging)
 # ================================
 
 services:
@@ -24,7 +24,6 @@ services:
         limits:
           cpus: "1.0"
           memory: 1G
-    # Base database for Faraday App
 
   redis:
     image: redis:7
@@ -44,7 +43,6 @@ services:
         limits:
           cpus: "0.5"
           memory: 512M
-    # Used for caching and async task queueing
 
   faraday:
     image: faradaysec/faraday:latest
@@ -57,8 +55,10 @@ services:
       FARADAY_REDIS_URL: redis://redis:6379/0
       FARADAY_SERVER_SECRET_KEY: "secret_$(openssl rand -hex 16)"
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - backend_net
       - frontend_net
@@ -67,53 +67,90 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     deploy:
       replicas: 2
       resources:
         limits:
           cpus: "2.0"
           memory: 2G
-    # Main Faraday App (scalable)
 
   nginx:
-    image: nginx:latest
+    image: nginx:alpine
     restart: always
     depends_on:
-      - faraday
+      faraday:
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
     networks:
       - frontend_net
+      - backend_net
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - nginx_certs:/etc/nginx/certs
     environment:
       DOMAIN_NAME: "faraday.local"
-    entrypoint: ["/bin/bash", "-c"]
-    command: >
-      "
-      CERT_DIR='/etc/nginx/certs';
-      mkdir -p ${CERT_DIR};
-      if [ ! -f ${CERT_DIR}/faraday.crt ]; then
-        echo '🔒 Generating random self-signed SSL certificate...';
+    entrypoint: >
+      /bin/sh -c '
+      set -e;
+      apk add --no-cache openssl curl >/dev/null;
+      CERT_DIR="/etc/nginx/certs";
+      mkdir -p "$CERT_DIR";
+      if [ ! -f "$CERT_DIR/faraday.crt" ]; then
+        echo "🔒 Generating self-signed SSL certificate...";
         openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-          -keyout ${CERT_DIR}/faraday.key \
-          -out ${CERT_DIR}/faraday.crt \
-          -subj '/C=EG/ST=Alexandria/L=Alex/O=Faraday/CN=${DOMAIN_NAME}';
+          -keyout "$CERT_DIR/faraday.key" \
+          -out "$CERT_DIR/faraday.crt" \
+          -subj "/C=EG/ST=Alexandria/L=Alexandria/O=Faraday/OU=IT/CN=${DOMAIN_NAME}";
       fi;
-      echo '✅ Certificate ready. Starting Nginx...';
-      exec nginx -g 'daemon off;';
-      "
+      echo "✅ SSL ready. Starting nginx...";
+      nginx -g "daemon off;";
+      '
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k https://localhost || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     deploy:
       resources:
         limits:
           cpus: "1.0"
           memory: 512M
-    # HTTPS reverse proxy with auto certificate creation
 
 # ================================
-# Network Segregation
+# NGINX reverse proxy configuration
+# ================================
+# ./nginx/conf.d/default.conf
+# -----------------------------
+# server {
+#   listen 80;
+#   listen 443 ssl;
+#   ssl_certificate /etc/nginx/certs/faraday.crt;
+#   ssl_certificate_key /etc/nginx/certs/faraday.key;
+#   server_name faraday.local;
+#
+#   location / {
+#     proxy_pass http://faraday:5985/;
+#     proxy_set_header Host $host;
+#     proxy_set_header X-Real-IP $remote_addr;
+#     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#     proxy_set_header X-Forwarded-Proto $scheme;
+#   }
+# }
+
+# ================================
+# Networks and Volumes
 # ================================
 networks:
   frontend_net:
@@ -121,9 +158,6 @@ networks:
   backend_net:
     driver: bridge
 
-# ================================
-# Volumes
-# ================================
 volumes:
   pg_data:
   redis_data:
