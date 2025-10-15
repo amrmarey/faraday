@@ -1,164 +1,93 @@
-# ================================
-# Faraday Security Platform - Secure Docker Compose Deployment (with live logging)
-# ================================
+version: '3.8'
 
 services:
   postgres:
     image: postgres:14
+    container_name: postgres
     restart: always
     environment:
-      POSTGRES_USER: faraday
-      POSTGRES_PASSWORD: faraday_secure_pass
-      POSTGRES_DB: faraday
+      POSTGRES_USER: ${POSTGRES_USER:-faraday}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-faradaypass}
+      POSTGRES_DB: ${POSTGRES_DB:-faraday}
     volumes:
-      - pg_data:/var/lib/postgresql/data
-    networks:
-      - backend_net
+      - faraday_pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U faraday"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-faraday}"]
+      interval: 10s
+      timeout: 5s
       retries: 5
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 1G
+    networks:
+      - faraday_net
 
   redis:
     image: redis:7
+    container_name: redis
     restart: always
-    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
     volumes:
-      - redis_data:/data
-    networks:
-      - backend_net
+      - faraday_redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
+      interval: 10s
+      timeout: 5s
       retries: 5
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 512M
+    networks:
+      - faraday_net
 
   faraday:
     image: faradaysec/faraday:latest
-    restart: always
-    environment:
-      FARADAY_POSTGRESQL_HOST: postgres
-      FARADAY_POSTGRESQL_PORT: 5432
-      FARADAY_POSTGRESQL_USER: faraday
-      FARADAY_POSTGRESQL_PASSWORD: faraday_secure_pass
-      FARADAY_REDIS_URL: redis://redis:6379/0
-      FARADAY_SERVER_SECRET_KEY: "secret_$(openssl rand -hex 16)"
+    container_name: faraday
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    networks:
-      - backend_net
-      - frontend_net
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5985/_api/version"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
-    deploy:
-      replicas: 2
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 2G
-
-  nginx:
-    image: nginx:alpine
-    restart: always
-    depends_on:
-      faraday:
-        condition: service_healthy
-    ports:
-      - "80:80"
-      - "443:443"
-    networks:
-      - frontend_net
-      - backend_net
-    volumes:
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - nginx_certs:/etc/nginx/certs
     environment:
-      DOMAIN_NAME: "faraday.local"
+      FARADAY_DATABASE_URL: postgresql://${POSTGRES_USER:-faraday}:${POSTGRES_PASSWORD:-faradaypass}@postgres:5432/${POSTGRES_DB:-faraday}
+      FARADAY_REDIS_URL: redis://redis:6379/0
+      FARADAY_SECRET_KEY: ${FARADAY_SECRET_KEY:-faradaysecret}
+      POSTGRES_USER: ${POSTGRES_USER:-faraday}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-faradaypass}
+      POSTGRES_DB: ${POSTGRES_DB:-faraday}
+    volumes:
+      - faraday_data:/home/faraday/.faraday  # Existing volume
+      - ./server.ini.template:/app/server.ini.template  # Mount the template file
     entrypoint: >
-      /bin/sh -c '
-      set -e;
-      apk add --no-cache openssl curl >/dev/null;
-      CERT_DIR="/etc/nginx/certs";
-      mkdir -p "$CERT_DIR";
-      if [ ! -f "$CERT_DIR/faraday.crt" ]; then
-        echo "🔒 Generating self-signed SSL certificate...";
-        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-          -keyout "$CERT_DIR/faraday.key" \
-          -out "$CERT_DIR/faraday.crt" \
-          -subj "/C=EG/ST=Alexandria/L=Alexandria/O=Faraday/OU=IT/CN=${DOMAIN_NAME}";
-      fi;
-      echo "✅ SSL ready. Starting nginx...";
-      nginx -g "daemon off;";
-      '
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -k https://localhost || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 512M
-
-# ================================
-# NGINX reverse proxy configuration
-# ================================
-# ./nginx/conf.d/default.conf
-# -----------------------------
-# server {
-#   listen 80;
-#   listen 443 ssl;
-#   ssl_certificate /etc/nginx/certs/faraday.crt;
-#   ssl_certificate_key /etc/nginx/certs/faraday.key;
-#   server_name faraday.local;
-#
-#   location / {
-#     proxy_pass http://faraday:5985/;
-#     proxy_set_header Host $host;
-#     proxy_set_header X-Real-IP $remote_addr;
-#     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-#     proxy_set_header X-Forwarded-Proto $scheme;
-#   }
-# }
-
-# ================================
-# Networks and Volumes
-# ================================
-networks:
-  frontend_net:
-    driver: bridge
-  backend_net:
-    driver: bridge
+      /bin/bash -c "
+        set -e  # Exit on error for better debugging
+        
+        # Install necessary tools
+        apt-get update && apt-get install -y gettext postgresql-client || echo 'Warning: Failed to install required packages, skipping...';
+        
+        echo '🚀 Processing server.ini from template...';
+        envsubst < /app/server.ini.template > /home/faraday/.faraday/config/server.ini;  # Generate server.ini from template
+        
+        echo '🚀 Checking PostgreSQL readiness...';
+        echo \"Debug: POSTGRES_USER is set to '$POSTGRES_USER'\";  # Debug the variable
+        until pg_isready -h postgres -U \"$POSTGRES_USER\"; do
+          echo 'PostgreSQL not ready yet, retrying in 2s...';
+          sleep 2;
+        done;
+        
+        echo '✅ PostgreSQL is ready.';
+        echo '🛠 Initializing Faraday database if needed...';
+        if ! faraday-manage initdb; then
+          echo 'Warning: Database initialization failed, but continuing...';
+        fi;
+        
+        echo '🚀 Starting Faraday...';
+        faraday-server;
+      "
+    ports:
+      - "5985:5985"
+    networks:
+      - faraday_net
 
 volumes:
-  pg_data:
-  redis_data:
-  nginx_certs:
+  faraday_pg_data:
+  faraday_redis_data:
+  faraday_data:
+
+networks:
+  faraday_net:
+    driver: bridge
