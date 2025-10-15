@@ -1,19 +1,10 @@
 # ================================
 # Faraday Security Platform - Secure Docker Compose Deployment
 # ================================
-# Includes:
-# - PostgreSQL (DB)
-# - Redis (Cache)
-# - Faraday App + Workers
-# - Nginx Reverse Proxy (HTTPS)
-# - Automated Self-signed Certificate Creation (on first run)
-# - Health checks, resource isolation, scaling, and dependencies
-# ================================
 
 services:
   postgres:
     image: postgres:14
-    container_name: faraday_postgres
     restart: always
     environment:
       POSTGRES_USER: faraday
@@ -33,11 +24,10 @@ services:
         limits:
           cpus: "1.0"
           memory: 1G
-    # Dependency: Base DB for Faraday App
+    # Base database for Faraday App
 
   redis:
     image: redis:7
-    container_name: faraday_redis
     restart: always
     command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
     volumes:
@@ -54,11 +44,10 @@ services:
         limits:
           cpus: "0.5"
           memory: 512M
-    # Used for caching and async job management
+    # Used for caching and async task queueing
 
   faraday:
-    image: infobyte/faraday
-    container_name: faraday_app
+    image: faradaysec/faraday:latest
     restart: always
     environment:
       FARADAY_POSTGRESQL_HOST: postgres
@@ -79,16 +68,15 @@ services:
       timeout: 10s
       retries: 5
     deploy:
-      replicas: 2        # Scaling enabled
+      replicas: 2
       resources:
         limits:
           cpus: "2.0"
           memory: 2G
-    # Core Faraday app handling user interaction and API
+    # Main Faraday App (scalable)
 
   nginx:
     image: nginx:latest
-    container_name: faraday_nginx
     restart: always
     depends_on:
       - faraday
@@ -101,13 +89,10 @@ services:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - nginx_certs:/etc/nginx/certs
     environment:
-      - DOMAIN_NAME=faraday.local
+      DOMAIN_NAME: "faraday.local"
     entrypoint: ["/bin/bash", "-c"]
     command: >
       "
-      # ==========================
-      # Auto-generate self-signed certificate if not exists
-      # ==========================
       CERT_DIR='/etc/nginx/certs';
       mkdir -p ${CERT_DIR};
       if [ ! -f ${CERT_DIR}/faraday.crt ]; then
@@ -117,7 +102,7 @@ services:
           -out ${CERT_DIR}/faraday.crt \
           -subj '/C=EG/ST=Alexandria/L=Alex/O=Faraday/CN=${DOMAIN_NAME}';
       fi;
-      echo '✅ Certificate ready, starting Nginx...';
+      echo '✅ Certificate ready. Starting Nginx...';
       exec nginx -g 'daemon off;';
       "
     deploy:
@@ -125,8 +110,7 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
-    # Acts as HTTPS reverse proxy with auto cert generation
-    # Handles traffic securely from external network to Faraday app
+    # HTTPS reverse proxy with auto certificate creation
 
 # ================================
 # Network Segregation
