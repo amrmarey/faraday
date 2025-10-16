@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:14
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-faraday}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-faradaypass}
+      POSTGRES_DB: ${POSTGRES_DB:-faraday}
+    volumes:
+      - faraday_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-faraday}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - faraday_net
+
+  redis:
+    image: redis:7
+    container_name: redis
+    restart: always
+    volumes:
+      - faraday_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - faraday_net
+
+  faraday:
+    image: faradaysec/faraday:latest  # Official image from the repository
+    container_name: faraday
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      FARADAY_DATABASE_URL: postgresql://${POSTGRES_USER:-faraday}:${POSTGRES_PASSWORD:-faradaypass}@postgres:5432/${POSTGRES_DB:-faraday}
+      FARADAY_REDIS_URL: redis://redis:6379/0
+      FARADAY_SECRET_KEY: ${FARADAY_SECRET_KEY:-faradaysecret}
+      POSTGRES_USER: ${POSTGRES_USER:-faraday}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-faradaypass}
+      POSTGRES_DB: ${POSTGRES_DB:-faraday}
+    volumes:
+      - faraday_data:/home/faraday/.faraday
+      - ./server.ini.template:/app/server.ini.template  # Mount template as before
+    entrypoint: >
+      /bin/bash -c "
+        set -e
+        
+        # Process server.ini from template using envsubst (as per repo best practices)
+        apt-get update && apt-get install -y gettext || echo 'Warning: gettext not installed, skipping...';
+        envsubst < /app/server.ini.template > /home/faraday/.faraday/config/server.ini;
+        
+        # Simplified PostgreSQL check
+        until pg_isready -h postgres -U \"$POSTGRES_USER\"; do
+          echo 'Waiting for PostgreSQL...';
+          sleep 2;
+        done;
+        
+        faraday-manage initdb || echo 'Database init skipped or failed';
+        
+        faraday-server;
+      "
+    ports:
+      - "5985:5985"
+    networks:
+      - faraday_net
+
+volumes:
+  faraday_pg_data:
+  faraday_redis_data:
+  faraday_data:
+
+networks:
+  faraday_net:
+    driver: bridge

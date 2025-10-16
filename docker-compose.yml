@@ -1,93 +1,40 @@
-version: '3.8'
-
+#version: '3.8'
 services:
-  postgres:
-    image: postgres:14
-    container_name: postgres
+  db:
+    image: postgres # postgres:12.7-alpine
     restart: always
+    container_name: faraday_db
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-faraday}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-faradaypass}
-      POSTGRES_DB: ${POSTGRES_DB:-faraday}
-    volumes:
-      - faraday_pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-faraday}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - faraday_net
-
-  redis:
-    image: redis:7
-    container_name: redis
-    restart: always
-    volumes:
-      - faraday_redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - faraday_net
-
-  faraday:
-    image: faradaysec/faraday:latest
-    container_name: faraday
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      FARADAY_DATABASE_URL: postgresql://${POSTGRES_USER:-faraday}:${POSTGRES_PASSWORD:-faradaypass}@postgres:5432/${POSTGRES_DB:-faraday}
-      FARADAY_REDIS_URL: redis://redis:6379/0
-      FARADAY_SECRET_KEY: ${FARADAY_SECRET_KEY:-faradaysecret}
-      POSTGRES_USER: ${POSTGRES_USER:-faraday}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-faradaypass}
-      POSTGRES_DB: ${POSTGRES_DB:-faraday}
-    volumes:
-      - faraday_data:/home/faraday/.faraday  # Existing volume
-      - ./server.ini.template:/app/server.ini.template  # Mount the template file
-    entrypoint: >
-      /bin/bash -c "
-        set -e  # Exit on error for better debugging
-        
-        # Install necessary tools
-        apt-get update && apt-get install -y gettext postgresql-client || echo 'Warning: Failed to install required packages, skipping...';
-        
-        echo '🚀 Processing server.ini from template...';
-        envsubst < /app/server.ini.template > /home/faraday/.faraday/config/server.ini;  # Generate server.ini from template
-        
-        echo '🚀 Checking PostgreSQL readiness...';
-        echo \"Debug: POSTGRES_USER is set to '$POSTGRES_USER'\";  # Debug the variable
-        until pg_isready -h postgres -U \"$POSTGRES_USER\"; do
-          echo 'PostgreSQL not ready yet, retrying in 2s...';
-          sleep 2;
-        done;
-        
-        echo '✅ PostgreSQL is ready.';
-        echo '🛠 Initializing Faraday database if needed...';
-        if ! faraday-manage initdb; then
-          echo 'Warning: Database initialization failed, but continuing...';
-        fi;
-        
-        echo '🚀 Starting Faraday...';
-        faraday-server;
-      "
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=faraday
     ports:
-      - "5985:5985"
-    networks:
-      - faraday_net
-
+      - '5432'
+    volumes:
+      - "db:/var/lib/postgresql/data:rw"
+  redis:
+    image: redis #'redis:6.2-alpine'
+    container_name: faraday_redis
+    ports:
+      - '6379'
+  app:
+    image: faradaysec/faraday
+    restart: always
+    container_name: faraday_app
+    entrypoint: "/entrypoint.sh"
+    volumes:
+     - "$HOME/.faraday:/home/faraday/.faraday:rw"
+    environment:
+      - PGSQL_USER=postgres
+      - PGSQL_PASSWD=postgres
+      - PGSQL_HOST=db
+      - PGSQL_DBNAME=faraday
+      - REDIS_SERVER=redis
+    depends_on:
+     - db
+     - redis
+    ports:
+     - "5985:5985"
 volumes:
-  faraday_pg_data:
-  faraday_redis_data:
-  faraday_data:
-
-networks:
-  faraday_net:
-    driver: bridge
+  db:
+    driver: local
